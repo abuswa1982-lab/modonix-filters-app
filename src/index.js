@@ -363,6 +363,12 @@ summary{cursor:pointer;font-weight:700;list-style:none;display:flex;justify-cont
   <div class="tabpanel active" id="panel-categories">
     <div class="panel">
       <p class="tagline" style="margin:0 0 22px">A category's attribute list and its closed "Type" vocabulary live here, shared by everyone who uses this app. Nothing gets classified against a category that doesn't exist here yet.</p>
+      <div class="row" style="margin-bottom:20px">
+        <button class="btn-secondary" onclick="pcDownloadTemplate()">Download Category Template</button>
+        <input type="file" id="pc_uploadInput" accept=".csv,.xlsx,.xls" style="display:none">
+        <button class="btn-secondary" onclick="document.getElementById('pc_uploadInput').click()">Upload Category Template</button>
+      </div>
+      <p class="hint" style="margin-top:-14px;margin-bottom:20px">Template has 3 columns: Category, Attributes (comma-separated), Types (comma-separated, optional). Fill in as many rows as you want — one at a time is fine, or a big batch, both work the same way.</p>
       <div class="row" style="align-items:flex-end;margin-bottom:20px">
         <div class="field" style="margin-bottom:0;flex:1;min-width:200px"><label>Category</label><input type="text" id="pc_newCategory" placeholder="e.g. Gloves, Drill Bits"></div>
         <div class="field" style="margin-bottom:0;flex:2;min-width:260px"><label>Attributes <span class="opt">(comma separated)</span></label><input type="text" id="pc_newAttrs" placeholder="e.g. Type, Cut Level, Coating, Color"></div>
@@ -384,7 +390,9 @@ summary{cursor:pointer;font-weight:700;list-style:none;display:flex;justify-cont
         <div class="field" style="margin-bottom:0;flex:1;min-width:220px"><label>Category</label><select id="pcl_category" onchange="pclOnCategoryChange()"><option value="">-- Choose a category --</option></select></div>
         <div class="field" style="margin-bottom:0"><label>Brand override <span class="opt">(optional)</span></label><input type="text" id="pcl_brand" style="width:180px"></div>
       </div>
-      <div class="field"><label>Upload <span class="opt">(.csv, .xlsx, .xls, or .pdf)</span></label><input type="file" id="pcl_fileInput" accept=".csv,.xlsx,.xls,.pdf"><p class="hint">CSV/XLSX needs a column with "item" or "part" and one with "name", "description", or "product".</p></div>
+      <div class="field"><label>Upload <span class="opt">(.csv, .xlsx, .xls, or .pdf)</span></label><input type="file" id="pcl_fileInput" accept=".csv,.xlsx,.xls,.pdf"><p class="hint">CSV/XLSX needs a column with "item" or "part" and one with "name", "description", or "product". Any OTHER columns in your sheet (specs, notes, whatever you already have) are automatically included as context for the AI — you don't need to reformat existing data, just make sure those two required columns exist.</p>
+        <button class="btn-secondary" onclick="pclDownloadTemplate()" style="margin-top:8px">Download Item Template</button>
+      </div>
       <div id="pcl_pdfRangeBox" style="display:none;background:var(--card);border:1px solid var(--seam);padding:16px;margin-bottom:20px">
         <div class="row" style="margin-bottom:10px"><span style="font-size:11px;color:var(--seam);text-transform:uppercase">PDF loaded — <span id="pcl_pageCount"></span></span></div>
         <div class="row"><div class="field" style="margin:0"><label>From page</label><input type="number" id="pcl_pageFrom" min="1" value="1"></div><div class="field" style="margin:0"><label>To page</label><input type="number" id="pcl_pageTo" min="1" value="1"></div><button class="btn-secondary" onclick="pclExtractPdfRange()">Extract this range</button></div>
@@ -429,6 +437,44 @@ function pcRenderCategoryList(){
         '<button class="btn-copy" onclick="pcDeleteCategory(\\''+name.replace(/'/g,"\\\\'")+'\\')">Delete</button>'+
       '</div></details>';
   }).join('');
+}
+function pcDownloadTemplate(){
+  const rows = [
+    {'Category':'Gloves','Attributes (comma-separated)':'Type, Cut Level, Coating, Color, Material','Types (comma-separated, optional)':'Welding Glove, Cut-Resistant Glove, Driver Glove'},
+    {'Category':'','Attributes (comma-separated)':'','Types (comma-separated, optional)':''}
+  ];
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Categories');
+  XLSX.writeFile(wb, 'category_template.xlsx');
+}
+document.addEventListener('DOMContentLoaded', function(){
+  const pcUpload = document.getElementById('pc_uploadInput');
+  if(pcUpload) pcUpload.addEventListener('change', function(){ pcUploadTemplate(this.files[0]); });
+});
+async function pcUploadTemplate(file){
+  if(!file) return;
+  setStatus('pc_status','working','Reading the sheet.');
+  try{
+    const buf = await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result);r.onerror=rej;r.readAsArrayBuffer(file);});
+    const wb = XLSX.read(buf,{type:'array'});
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws,{defval:''});
+    const valid = rows.filter(r=>String(r['Category']||'').trim());
+    if(!valid.length) throw new Error('No rows with a Category filled in were found.');
+    let saved = 0;
+    for(const r of valid){
+      const category = String(r['Category']||'').trim();
+      const attrs = String(r['Attributes (comma-separated)']||'').split(',').map(s=>s.trim()).filter(Boolean);
+      const types = String(r['Types (comma-separated, optional)']||'').split(',').map(s=>s.trim()).filter(Boolean);
+      if(!category || !attrs.length) continue;
+      setStatus('pc_status','working','Saving '+(saved+1)+' of '+valid.length+': '+category);
+      await fetch('/api/product-categories/upsert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category,attrs,types})});
+      saved++;
+    }
+    setStatus('pc_status','done',saved+' categor'+(saved===1?'y':'ies')+' saved from the sheet.');
+    pcLoadCategories();
+  }catch(e){ setStatus('pc_status','error','Upload failed: '+e.message); }
 }
 async function pcSuggestAttrs(){
   const category = document.getElementById('pc_newCategory').value.trim();
@@ -503,6 +549,17 @@ document.addEventListener('DOMContentLoaded', function(){
   pcLoadCategories(); pcLoadReviewQueue();
 });
 
+function pclDownloadTemplate(){
+  const rows = [
+    {'Item Number':'PIP-34-C230','Product Name':'MaxiFlex Cut-Resistant Work Gloves','Notes':'Level A2 cut protection, nitrile coated palm'},
+    {'Item Number':'','Product Name':'','Notes':''}
+  ];
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Items');
+  XLSX.writeFile(wb, 'item_template.xlsx');
+}
+
 function pclHandleFile(file){
   if(!file) return;
   document.getElementById('pcl_pdfRangeBox').style.display='none';
@@ -520,7 +577,9 @@ function pclHandleFile(file){
         const vals = lines[i].split(',').map(v=>v.trim().replace(/"/g,''));
         const productName = nameIdx>=0?vals[nameIdx]:'';
         if(!productName) continue;
-        rows.push({itemNumber:itemIdx>=0?vals[itemIdx]:'', productName, extraInfo:''});
+        const extraParts = [];
+        headers.forEach((h,hi)=>{ if(hi!==itemIdx && hi!==nameIdx && vals[hi]) extraParts.push(h+': '+vals[hi]); });
+        rows.push({itemNumber:itemIdx>=0?vals[itemIdx]:'', productName, extraInfo:extraParts.join(', ')});
       }
     } else {
       const wb = XLSX.read(e.target.result,{type:'array'});
@@ -532,7 +591,9 @@ function pclHandleFile(file){
       for(let i=1;i<data.length;i++){
         const row = data[i]; const productName = nameIdx>=0?String(row[nameIdx]||'').trim():'';
         if(!productName) continue;
-        rows.push({itemNumber:itemIdx>=0?String(row[itemIdx]||'').trim():'', productName, extraInfo:''});
+        const extraParts = [];
+        headers.forEach((h,hi)=>{ if(hi!==itemIdx && hi!==nameIdx && row[hi]!==undefined && String(row[hi]).trim()) extraParts.push(h+': '+String(row[hi]).trim()); });
+        rows.push({itemNumber:itemIdx>=0?String(row[itemIdx]||'').trim():'', productName, extraInfo:extraParts.join(', ')});
       }
     }
     pclRows = rows; pclRenderRows(); setStatus('pcl_status','done',rows.length+' rows loaded.'); pclOnCategoryChange();
