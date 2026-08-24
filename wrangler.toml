@@ -5,4 +5,4 @@ compatibility_date = "2024-09-23"
 [[d1_databases]]
 binding = "DB"
 database_name = "modonix-filters-db"
-database_id = "REPLACE_WITH_YOUR_DATABASE_ID"
+database_id = "3001ac07-e461-4b2d-842f-74efa332033a"
