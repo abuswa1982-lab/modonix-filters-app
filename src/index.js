@@ -23,6 +23,7 @@ export default {
     if (p === '/api/product-type-review-queue' && m === 'GET') return handleProductTypeReviewList(request, env);
     if (p === '/api/product-type-review-resolve' && m === 'POST') return handleProductTypeReviewResolve(request, env);
     if (p === '/api/product-extract-pdf-chunk' && m === 'POST') return handleProductExtractPdfChunk(request, env);
+    if (p === '/api/product-suggest-attributes' && m === 'POST') return handleProductSuggestAttributes(request, env);
     return new Response(PAGE_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
 };
@@ -257,6 +258,35 @@ async function handleProductExtractPdfChunk(request, env) {
   } catch (e) { return jsonResponse({ error: 'Extraction failed: ' + e.message, items: [] }, 500); }
 }
 
+// ---- POST /api/product-suggest-attributes ----
+// Given just a category name (and optionally a sample product or two),
+// proposes a starting attribute list and, where obvious, a starting Type
+// vocabulary. This is a SUGGESTION only — the person reviews and edits it
+// in the Product Categories form before Save actually writes anything, so
+// a bad or generic suggestion never silently becomes the taxonomy.
+async function handleProductSuggestAttributes(request, env) {
+  let body;
+  try { body = await request.json(); } catch (e) { return jsonResponse({ error: 'Invalid JSON body' }, 400); }
+  const { category, sampleText } = body || {};
+  if (!category || !category.trim()) return jsonResponse({ error: 'Missing "category"' }, 400);
+
+  const system = 'You are a product taxonomy expert for e-commerce and industrial distribution. ' +
+    'Given a product category name and optional sample product text, propose the filter attributes buyers would use to narrow down this product type. ' +
+    'Rules: return 6-14 attributes, ordered from most to least commonly used as a filter. ALWAYS include "Type" first if the category plausibly has meaningful sub-types (most categories do). ' +
+    'Where the category has a small number of genuinely standard values for Type (e.g. a narrow, well-known product family), also propose a short starting "types" list of 3-8 specific values — leave it empty if you are not confident, since a wrong guess here is worse than an empty list a person fills in from real data. ' +
+    'Return ONLY valid JSON, no markdown fences, no explanation: {"attrs": ["Type","..."], "types": []}';
+  const prompt = 'Category: ' + category.trim() + (sampleText ? '\nSample products:\n' + sampleText.slice(0, 2000) : '');
+
+  try {
+    const raw = await callClaudeWithRetry(env, { system, prompt, maxTokens: 700 });
+    const parsed = tryParseJSON(raw);
+    if (!parsed) throw new Error('Could not parse model response as JSON');
+    return jsonResponse({ attrs: Array.isArray(parsed.attrs) ? parsed.attrs : [], types: Array.isArray(parsed.types) ? parsed.types : [] }, 200);
+  } catch (e) {
+    return jsonResponse({ error: 'Suggestion failed: ' + e.message }, 500);
+  }
+}
+
 const PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -336,8 +366,10 @@ summary{cursor:pointer;font-weight:700;list-style:none;display:flex;justify-cont
       <div class="row" style="align-items:flex-end;margin-bottom:20px">
         <div class="field" style="margin-bottom:0;flex:1;min-width:200px"><label>Category</label><input type="text" id="pc_newCategory" placeholder="e.g. Gloves, Drill Bits"></div>
         <div class="field" style="margin-bottom:0;flex:2;min-width:260px"><label>Attributes <span class="opt">(comma separated)</span></label><input type="text" id="pc_newAttrs" placeholder="e.g. Type, Cut Level, Coating, Color"></div>
+        <button class="btn-secondary" id="pc_suggestBtn" onclick="pcSuggestAttrs()">Suggest via AI</button>
         <button class="btn-mine" onclick="pcSaveCategory()">Save</button>
       </div>
+      <p class="hint" style="margin-top:-14px;margin-bottom:20px">"Suggest via AI" proposes a starting attribute list (and Type list, where obvious) from the category name alone — nothing is saved until you review it and click Save.</p>
       <div class="field"><label>Starting "Type" list <span class="opt">(optional — leave blank to build it up via review as you classify)</span></label><input type="text" id="pc_newTypes" placeholder="e.g. Welding Glove, Cut-Resistant Glove"></div>
       <div class="status" id="pc_status"></div>
       <div class="saved-panel"><label>Type Review Queue <span class="opt">(new Type values proposed while classifying)</span></label><div id="pc_reviewQueue"></div></div>
@@ -397,6 +429,22 @@ function pcRenderCategoryList(){
         '<button class="btn-copy" onclick="pcDeleteCategory(\\''+name.replace(/'/g,"\\\\'")+'\\')">Delete</button>'+
       '</div></details>';
   }).join('');
+}
+async function pcSuggestAttrs(){
+  const category = document.getElementById('pc_newCategory').value.trim();
+  if(!category){ setStatus('pc_status','error','Type a category name first, then click Suggest.'); return; }
+  const btn = document.getElementById('pc_suggestBtn');
+  btn.disabled = true; const origText = btn.textContent; btn.textContent = 'Thinking...';
+  setStatus('pc_status','working','Asking Claude for a starting attribute list for "'+category+'".');
+  try{
+    const resp = await fetch('/api/product-suggest-attributes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category})});
+    const data = await resp.json();
+    if(!resp.ok) throw new Error(data.error||'Suggestion failed');
+    document.getElementById('pc_newAttrs').value = (data.attrs||[]).join(', ');
+    document.getElementById('pc_newTypes').value = (data.types||[]).join(', ');
+    setStatus('pc_status','done','Suggested '+(data.attrs||[]).length+' attributes'+((data.types||[]).length?' and '+data.types.length+' starting Types':'')+' — review and edit before clicking Save.');
+  }catch(e){ setStatus('pc_status','error','Could not suggest: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent=origText; }
 }
 async function pcSaveCategory(){
   const category = document.getElementById('pc_newCategory').value.trim();
@@ -577,9 +625,21 @@ async function pclRunClassify(){
   setStatus('pcl_status','done',done+' classified ('+newCount+' new, '+cachedCount+' from cache), '+errCount+' error(s). Check Product Categories if any rows say "Type needs review."');
 }
 
+function pclBuildPipeString(itemNumber, productName, attrs, attrValues, brand){
+  const pairs = [];
+  if(brand) pairs.push('Brand:'+brand);
+  attrs.forEach(attr=>{
+    if(attr.toLowerCase()==='brand') return;
+    const val = attrValues[attr];
+    if(val!==null && val!==undefined && String(val).trim()!=='') pairs.push(attr+':'+String(val).trim());
+  });
+  return pairs.join('|');
+}
+
 function pclExportXlsx(){
   if(!pclResults.length || !pclResults.some(r=>r&&r.status==='done')){ setStatus('pcl_status','error','Nothing classified yet.'); return; }
   const category = document.getElementById('pcl_category').value;
+  const brand = document.getElementById('pcl_brand').value.trim();
   const attrs = (pclCategoriesCache[category]&&pclCategoriesCache[category].attrs)||[];
   const rows = pclRows.map((r,i)=>{
     const res = pclResults[i]; const a = (res&&res.attributes)||{};
@@ -587,6 +647,7 @@ function pclExportXlsx(){
     attrs.forEach(attr=>{ base[attr]=a[attr]||''; });
     base['Confidence'] = res?res.confidence||'':'';
     base['Status'] = res?res.status:'not run';
+    base['Pipe Format'] = res&&res.status==='done' ? pclBuildPipeString(r.itemNumber,r.productName,attrs,a,brand) : '';
     return base;
   });
   const ws = XLSX.utils.json_to_sheet(rows);
