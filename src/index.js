@@ -390,6 +390,11 @@ summary{cursor:pointer;font-weight:700;list-style:none;display:flex;justify-cont
         <div class="field" style="margin-bottom:0;flex:1;min-width:220px"><label>Category</label><select id="pcl_category" onchange="pclOnCategoryChange()"><option value="">-- Choose a category --</option></select></div>
         <div class="field" style="margin-bottom:0"><label>Brand override <span class="opt">(optional)</span></label><input type="text" id="pcl_brand" style="width:180px"></div>
       </div>
+      <div class="row" style="margin-bottom:20px;align-items:flex-end">
+        <div class="field" style="margin-bottom:0;flex:1;min-width:220px"><label>Or type a NEW category name <span class="opt">(not saved yet — system will check for a close match, or propose attributes for review)</span></label><input type="text" id="pcl_newCatName" placeholder="e.g. Safety Vests"></div>
+        <button class="btn-secondary" onclick="pclCheckNewCategory()">Check this category</button>
+      </div>
+      <div id="pcl_newCatReview" style="display:none;background:var(--card);border:1px solid var(--seam);padding:16px;margin-bottom:20px"></div>
       <div class="field"><label>Upload <span class="opt">(.csv, .xlsx, .xls, or .pdf)</span></label><input type="file" id="pcl_fileInput" accept=".csv,.xlsx,.xls,.pdf"><p class="hint">CSV/XLSX needs a column with "item" or "part" and one with "name", "description", or "product". Any OTHER columns in your sheet (specs, notes, whatever you already have) are automatically included as context for the AI — you don't need to reformat existing data, just make sure those two required columns exist.</p>
         <button class="btn-secondary" onclick="pclDownloadTemplate()" style="margin-top:8px">Download Item Template</button>
       </div>
@@ -544,6 +549,82 @@ async function pclLoadCategoryOptions(){
   sel.innerHTML = '<option value="">-- Choose a category --</option>'+Object.keys(pclCategoriesCache).sort((a,b)=>a.localeCompare(b)).map(c=>'<option value="'+esc(c)+'"'+(c===current?' selected':'')+'>'+esc(c)+'</option>').join('');
 }
 function pclOnCategoryChange(){ document.getElementById('pcl_runBtn').disabled = !(document.getElementById('pcl_category').value && pclRows.length); }
+
+// Same stem/contains matching used elsewhere in the Modonix tools, so a
+// typed "Safety Gloves" matches an existing "Gloves" before the system
+// ever proposes creating a near-duplicate category.
+function pclStemWord(w){ return String(w||'').trim().toLowerCase().replace(/(ies|ers|ing|er|es|s)$/i,''); }
+function pclFindClosestCategory(typed){
+  const names = Object.keys(pclCategoriesCache);
+  if(!typed) return null;
+  let match = names.find(c=>c.toLowerCase()===typed.toLowerCase());
+  if(match) return match;
+  const stem = pclStemWord(typed);
+  match = names.find(c=>pclStemWord(c)===stem);
+  if(match) return match;
+  const lower = typed.toLowerCase();
+  match = names.find(c=>{ const cl=c.toLowerCase(); return cl.includes(lower)||lower.includes(cl); });
+  return match || null;
+}
+
+async function pclCheckNewCategory(){
+  const typed = document.getElementById('pcl_newCatName').value.trim();
+  if(!typed){ setStatus('pcl_status','error','Type a category name first.'); return; }
+  const box = document.getElementById('pcl_newCatReview');
+  const closest = pclFindClosestCategory(typed);
+  if(closest){
+    box.style.display='block';
+    box.innerHTML = '<p style="margin-bottom:12px">This looks like it might be the same as your existing category <strong>"'+esc(closest)+'"</strong>.</p>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+        '<button class="btn-mine" onclick="pclUseExistingCategory(\\''+closest.replace(/'/g,"\\\\'")+'\\')">Use "'+esc(closest)+'"</button>'+
+        '<button class="btn-secondary" onclick="pclProposeNewCategory(\\''+typed.replace(/'/g,"\\\\'")+'\\')">No, this is genuinely different — propose a new one</button>'+
+      '</div>';
+    return;
+  }
+  pclProposeNewCategory(typed);
+}
+
+function pclUseExistingCategory(name){
+  document.getElementById('pcl_category').value = name;
+  document.getElementById('pcl_newCatReview').style.display='none';
+  document.getElementById('pcl_newCatName').value='';
+  pclOnCategoryChange();
+  setStatus('pcl_status','done','Using existing category "'+name+'".');
+}
+
+async function pclProposeNewCategory(typed){
+  const box = document.getElementById('pcl_newCatReview');
+  box.style.display='block';
+  box.innerHTML = '<p class="meta">Asking Claude to propose attributes for "'+esc(typed)+'"...</p>';
+  try{
+    const resp = await fetch('/api/product-suggest-attributes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:typed})});
+    const data = await resp.json();
+    if(!resp.ok) throw new Error(data.error||'Suggestion failed');
+    box.innerHTML =
+      '<p style="margin-bottom:12px"><strong>"'+esc(typed)+'"</strong> isn\\'t in your Product Categories yet. Here\\'s a proposed starting list — nothing is saved until you click Add.</p>'+
+      '<div class="field"><label>Attributes</label><input type="text" id="pcl_proposedAttrs" value="'+esc((data.attrs||[]).join(', '))+'"></div>'+
+      '<div class="field"><label>Starting Types <span class="opt">(optional)</span></label><input type="text" id="pcl_proposedTypes" value="'+esc((data.types||[]).join(', '))+'"></div>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+        '<button class="btn-mine" onclick="pclApproveNewCategory(\\''+typed.replace(/'/g,"\\\\'")+'\\')">Add to Product Categories &amp; use it</button>'+
+        '<button class="btn-secondary" onclick="document.getElementById(\\'pcl_newCatReview\\').style.display=\\'none\\'">Cancel</button>'+
+      '</div>';
+  }catch(e){ box.innerHTML = '<p style="color:var(--err)">Could not propose attributes: '+esc(e.message)+'</p>'; }
+}
+
+async function pclApproveNewCategory(typed){
+  const attrs = document.getElementById('pcl_proposedAttrs').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const types = document.getElementById('pcl_proposedTypes').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(!attrs.length){ setStatus('pcl_status','error','Attributes list is empty — add at least one before saving.'); return; }
+  const resp = await fetch('/api/product-categories/upsert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:typed,attrs,types})});
+  const data = await resp.json();
+  if(!resp.ok){ setStatus('pcl_status','error','Could not save: '+data.error); return; }
+  await pclLoadCategoryOptions();
+  document.getElementById('pcl_category').value = typed;
+  document.getElementById('pcl_newCatReview').style.display='none';
+  document.getElementById('pcl_newCatName').value='';
+  pclOnCategoryChange();
+  setStatus('pcl_status','done','"'+typed+'" added to Product Categories and selected.');
+}
 document.addEventListener('DOMContentLoaded', function(){
   document.getElementById('pcl_fileInput').addEventListener('change', function(){ pclHandleFile(this.files[0]); });
   pcLoadCategories(); pcLoadReviewQueue();
