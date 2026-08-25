@@ -283,8 +283,8 @@ async function handleProductSuggestAttributes(request, env) {
     'Given a product category name and optional sample product text, propose the filter attributes buyers would use to narrow down this product type, in TWO passes within this one response.\n\n' +
     'PASS 1 - DRAFT: List 6-14 attributes, most to least commonly used as a filter. Include "Type" first if the category plausibly has meaningful sub-types. Propose a short starting "types" list (3-8 values) only if you are confident in real, standard values for this category; otherwise leave it empty.\n\n' +
     'PASS 2 - SELF-CHECK (mandatory, do this before answering): Review your own PASS 1 draft for these two specific problems and fix them:\n' +
-    '  (a) MISSING COMPANION ATTRIBUTES: physical/dimensional specs are almost always given together, never alone. If you included one of Length, Width, Thickness, Diameter, Height, Depth, Weight, Size, or similar, check whether the category\\'s real-world specs typically include its usual companions too (e.g. a blade or tool with Length usually also has Width and Thickness; a garment with Size usually also has Fit). Add any obviously-missing companions.\n' +
-    '  (b) OVERLAPPING TYPE VALUES: check every value you put in "types" - do they all represent the SAME kind of distinction? A Type list must not mix categories that describe different things (e.g. cutting-purpose values like "Metal Cutting" mixed with construction/material values like "Bi-Metal" - those are two different dimensions). If you find a mix, keep only the values matching Type\\'s primary dimension, and move the other dimension\\'s concept into its own attribute if one isn\\'t already in your list (e.g. add "Material" or "Construction").\n\n' +
+    '  (a) MISSING COMPANION ATTRIBUTES: physical/dimensional specs are almost always given together, never alone. If you included one of Length, Width, Thickness, Diameter, Height, Depth, Weight, Size, or similar, check whether the category\'s real-world specs typically include its usual companions too (e.g. a blade or tool with Length usually also has Width and Thickness; a garment with Size usually also has Fit). Add any obviously-missing companions.\n' +
+    '  (b) OVERLAPPING TYPE VALUES: check every value you put in "types" - do they all represent the SAME kind of distinction? A Type list must not mix categories that describe different things (e.g. cutting-purpose values like "Metal Cutting" mixed with construction/material values like "Bi-Metal" - those are two different dimensions). If you find a mix, keep only the values matching Type\'s primary dimension, and move the other dimension\'s concept into its own attribute if one isn\'t already in your list (e.g. add "Material" or "Construction").\n\n' +
     'Return ONLY valid JSON, no markdown fences, no explanation outside the JSON: {"attrs": ["Type","..."], "types": [], "notes": ["one short sentence per correction PASS 2 actually made, empty array if none needed"]}';
   const prompt = 'Category: ' + category.trim() + (sampleText ? '\nSample products:\n' + sampleText.slice(0, 2000) : '');
 
@@ -450,7 +450,7 @@ function pcRenderCategoryList(){
       '<div style="padding:10px 0 0 14px">'+
         '<div style="margin-bottom:8px"><strong style="font-size:11px;color:var(--steel)">ATTRIBUTES</strong><br>'+c.attrs.map(a=>'<span class="cat-tag" style="margin:2px 4px 2px 0">'+esc(a)+'</span>').join('')+'</div>'+
         (c.types.length?'<div style="margin-bottom:8px"><strong style="font-size:11px;color:var(--steel)">TYPES</strong><br>'+c.types.map(t=>'<span class="cat-tag" style="margin:2px 4px 2px 0">'+esc(t)+'</span>').join('')+'</div>':'')+
-        '<button class="btn-copy" onclick="pcDeleteCategory(\\''+name.replace(/'/g,"\\\\'")+'\\')">Delete</button>'+
+        '<button class="btn-copy" onclick="pcDeleteCategory(\''+name.replace(/'/g,"\\\'")+'\')">Delete</button>'+
       '</div></details>';
   }).join('');
 }
@@ -537,9 +537,9 @@ function pcRenderReviewQueue(items){
     const existingTypes = (pcCategories[it.category]&&pcCategories[it.category].types)||[];
     return '<div class="saved-item"><div><strong>'+esc(it.proposed_type)+'</strong> <span class="meta">for '+esc(it.category)+'</span><br><span class="meta">seen on: '+esc(it.sample_item||'')+'</span></div>'+
       '<div style="display:flex;gap:6px;flex-wrap:wrap">'+
-        '<button class="btn-copy" onclick="pcResolveType('+it.id+',\\'approve\\')">Approve</button>'+
+        '<button class="btn-copy" onclick="pcResolveType('+it.id+',\'approve\')">Approve</button>'+
         (existingTypes.length?'<select id="pc_mergeSel_'+it.id+'" style="font-size:11px">'+existingTypes.map(t=>'<option value="'+esc(t)+'">'+esc(t)+'</option>').join('')+'</select><button class="btn-copy" onclick="pcMergeType('+it.id+')">Merge</button>':'')+
-        '<button class="btn-copy" onclick="pcResolveType('+it.id+',\\'reject\\')">Reject</button>'+
+        '<button class="btn-copy" onclick="pcResolveType('+it.id+',\'reject\')">Reject</button>'+
       '</div></div>';
   }).join('');
 }
@@ -588,8 +588,8 @@ async function pclCheckNewCategory(){
     box.style.display='block';
     box.innerHTML = '<p style="margin-bottom:12px">This looks like it might be the same as your existing category <strong>"'+esc(closest)+'"</strong>.</p>'+
       '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
-        '<button class="btn-mine" onclick="pclUseExistingCategory(\\''+closest.replace(/'/g,"\\\\'")+'\\')">Use "'+esc(closest)+'"</button>'+
-        '<button class="btn-secondary" onclick="pclProposeNewCategory(\\''+typed.replace(/'/g,"\\\\'")+'\\')">No, this is genuinely different — propose a new one</button>'+
+        '<button class="btn-mine" onclick="pclUseExistingCategory(\''+closest.replace(/'/g,"\\\'")+'\')">Use "'+esc(closest)+'"</button>'+
+        '<button class="btn-secondary" onclick="pclProposeNewCategory(\''+typed.replace(/'/g,"\\\'")+'\')">No, this is genuinely different — propose a new one</button>'+
       '</div>';
     return;
   }
@@ -613,13 +613,13 @@ async function pclProposeNewCategory(typed){
     const data = await resp.json();
     if(!resp.ok) throw new Error(data.error||'Suggestion failed');
     box.innerHTML =
-      '<p style="margin-bottom:12px"><strong>"'+esc(typed)+'"</strong> isn\\'t in your Product Categories yet. Here\\'s a proposed starting list — nothing is saved until you click Add.</p>'+
+      '<p style="margin-bottom:12px"><strong>"'+esc(typed)+'"</strong> isn\'t in your Product Categories yet. Here\'s a proposed starting list — nothing is saved until you click Add.</p>'+
       (data.notes&&data.notes.length ? '<p class="meta" style="margin-bottom:12px">Self-check caught and fixed: '+esc(data.notes.join(' '))+'</p>' : '<p class="meta" style="margin-bottom:12px">Self-check found nothing to fix.</p>')+
       '<div class="field"><label>Attributes</label><input type="text" id="pcl_proposedAttrs" value="'+esc((data.attrs||[]).join(', '))+'"></div>'+
       '<div class="field"><label>Starting Types <span class="opt">(optional)</span></label><input type="text" id="pcl_proposedTypes" value="'+esc((data.types||[]).join(', '))+'"></div>'+
       '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
-        '<button class="btn-mine" onclick="pclApproveNewCategory(\\''+typed.replace(/'/g,"\\\\'")+'\\')">Add to Product Categories &amp; use it</button>'+
-        '<button class="btn-secondary" onclick="document.getElementById(\\'pcl_newCatReview\\').style.display=\\'none\\'">Cancel</button>'+
+        '<button class="btn-mine" onclick="pclApproveNewCategory(\''+typed.replace(/'/g,"\\\'")+'\')">Add to Product Categories &amp; use it</button>'+
+        '<button class="btn-secondary" onclick="document.getElementById(\'pcl_newCatReview\').style.display=\'none\'">Cancel</button>'+
       '</div>';
   }catch(e){ box.innerHTML = '<p style="color:var(--err)">Could not propose attributes: '+esc(e.message)+'</p>'; }
 }
