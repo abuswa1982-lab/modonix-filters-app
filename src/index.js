@@ -261,9 +261,18 @@ async function handleProductExtractPdfChunk(request, env) {
 // ---- POST /api/product-suggest-attributes ----
 // Given just a category name (and optionally a sample product or two),
 // proposes a starting attribute list and, where obvious, a starting Type
-// vocabulary. This is a SUGGESTION only — the person reviews and edits it
-// in the Product Categories form before Save actually writes anything, so
-// a bad or generic suggestion never silently becomes the taxonomy.
+// vocabulary. Includes a mandatory self-check pass in the same prompt so
+// two specific, recurring failure modes get caught by the system itself
+// rather than depending on manual review every time:
+//   1. Missing companion attributes — physical/dimensional specs that are
+//      always given together (e.g. Length appears without Width/Thickness).
+//   2. Overlapping dimensions inside "Type" — mixing two different kinds
+//      of distinction into one attribute (e.g. cutting-purpose values like
+//      "Metal Cutting" mixed with construction values like "Bi-Metal" that
+//      actually belong under a separate "Material" attribute).
+// The response includes "notes" describing anything the self-check
+// changed, so the correction is visible, not silent — this is still a
+// suggestion the person reviews and edits, not an auto-trusted result.
 async function handleProductSuggestAttributes(request, env) {
   let body;
   try { body = await request.json(); } catch (e) { return jsonResponse({ error: 'Invalid JSON body' }, 400); }
@@ -271,17 +280,19 @@ async function handleProductSuggestAttributes(request, env) {
   if (!category || !category.trim()) return jsonResponse({ error: 'Missing "category"' }, 400);
 
   const system = 'You are a product taxonomy expert for e-commerce and industrial distribution. ' +
-    'Given a product category name and optional sample product text, propose the filter attributes buyers would use to narrow down this product type. ' +
-    'Rules: return 6-14 attributes, ordered from most to least commonly used as a filter. ALWAYS include "Type" first if the category plausibly has meaningful sub-types (most categories do). ' +
-    'Where the category has a small number of genuinely standard values for Type (e.g. a narrow, well-known product family), also propose a short starting "types" list of 3-8 specific values — leave it empty if you are not confident, since a wrong guess here is worse than an empty list a person fills in from real data. ' +
-    'Return ONLY valid JSON, no markdown fences, no explanation: {"attrs": ["Type","..."], "types": []}';
+    'Given a product category name and optional sample product text, propose the filter attributes buyers would use to narrow down this product type, in TWO passes within this one response.\n\n' +
+    'PASS 1 - DRAFT: List 6-14 attributes, most to least commonly used as a filter. Include "Type" first if the category plausibly has meaningful sub-types. Propose a short starting "types" list (3-8 values) only if you are confident in real, standard values for this category; otherwise leave it empty.\n\n' +
+    'PASS 2 - SELF-CHECK (mandatory, do this before answering): Review your own PASS 1 draft for these two specific problems and fix them:\n' +
+    '  (a) MISSING COMPANION ATTRIBUTES: physical/dimensional specs are almost always given together, never alone. If you included one of Length, Width, Thickness, Diameter, Height, Depth, Weight, Size, or similar, check whether the category\\'s real-world specs typically include its usual companions too (e.g. a blade or tool with Length usually also has Width and Thickness; a garment with Size usually also has Fit). Add any obviously-missing companions.\n' +
+    '  (b) OVERLAPPING TYPE VALUES: check every value you put in "types" - do they all represent the SAME kind of distinction? A Type list must not mix categories that describe different things (e.g. cutting-purpose values like "Metal Cutting" mixed with construction/material values like "Bi-Metal" - those are two different dimensions). If you find a mix, keep only the values matching Type\\'s primary dimension, and move the other dimension\\'s concept into its own attribute if one isn\\'t already in your list (e.g. add "Material" or "Construction").\n\n' +
+    'Return ONLY valid JSON, no markdown fences, no explanation outside the JSON: {"attrs": ["Type","..."], "types": [], "notes": ["one short sentence per correction PASS 2 actually made, empty array if none needed"]}';
   const prompt = 'Category: ' + category.trim() + (sampleText ? '\nSample products:\n' + sampleText.slice(0, 2000) : '');
 
   try {
-    const raw = await callClaudeWithRetry(env, { system, prompt, maxTokens: 700 });
+    const raw = await callClaudeWithRetry(env, { system, prompt, maxTokens: 900 });
     const parsed = tryParseJSON(raw);
     if (!parsed) throw new Error('Could not parse model response as JSON');
-    return jsonResponse({ attrs: Array.isArray(parsed.attrs) ? parsed.attrs : [], types: Array.isArray(parsed.types) ? parsed.types : [] }, 200);
+    return jsonResponse({ attrs: Array.isArray(parsed.attrs) ? parsed.attrs : [], types: Array.isArray(parsed.types) ? parsed.types : [], notes: Array.isArray(parsed.notes) ? parsed.notes : [] }, 200);
   } catch (e) {
     return jsonResponse({ error: 'Suggestion failed: ' + e.message }, 500);
   }
@@ -493,7 +504,8 @@ async function pcSuggestAttrs(){
     if(!resp.ok) throw new Error(data.error||'Suggestion failed');
     document.getElementById('pc_newAttrs').value = (data.attrs||[]).join(', ');
     document.getElementById('pc_newTypes').value = (data.types||[]).join(', ');
-    setStatus('pc_status','done','Suggested '+(data.attrs||[]).length+' attributes'+((data.types||[]).length?' and '+data.types.length+' starting Types':'')+' — review and edit before clicking Save.');
+    const notesMsg = (data.notes&&data.notes.length) ? ' Self-check caught and fixed: '+data.notes.join(' ') : ' Self-check found nothing to fix.';
+    setStatus('pc_status','done','Suggested '+(data.attrs||[]).length+' attributes'+((data.types||[]).length?' and '+data.types.length+' starting Types':'')+' —'+notesMsg+' Review and edit before clicking Save.');
   }catch(e){ setStatus('pc_status','error','Could not suggest: '+e.message); }
   finally{ btn.disabled=false; btn.textContent=origText; }
 }
@@ -602,6 +614,7 @@ async function pclProposeNewCategory(typed){
     if(!resp.ok) throw new Error(data.error||'Suggestion failed');
     box.innerHTML =
       '<p style="margin-bottom:12px"><strong>"'+esc(typed)+'"</strong> isn\\'t in your Product Categories yet. Here\\'s a proposed starting list — nothing is saved until you click Add.</p>'+
+      (data.notes&&data.notes.length ? '<p class="meta" style="margin-bottom:12px">Self-check caught and fixed: '+esc(data.notes.join(' '))+'</p>' : '<p class="meta" style="margin-bottom:12px">Self-check found nothing to fix.</p>')+
       '<div class="field"><label>Attributes</label><input type="text" id="pcl_proposedAttrs" value="'+esc((data.attrs||[]).join(', '))+'"></div>'+
       '<div class="field"><label>Starting Types <span class="opt">(optional)</span></label><input type="text" id="pcl_proposedTypes" value="'+esc((data.types||[]).join(', '))+'"></div>'+
       '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
